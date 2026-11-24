@@ -32,18 +32,20 @@ from skillm_profile.runner import (
 
 
 @pytest.fixture(autouse=True)
-def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
     monkeypatch.delenv("SKILLM_PROFILE_CONFIG", raising=False)
+    monkeypatch.setattr("skillm_profile.cli.shutil.which", lambda _: "/usr/local/bin/skillm")
     return fake_home
 
 
 @pytest.fixture
 def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     collection_dir = tmp_path / "skills-collection"
+    collection_dir.mkdir()
     profiles_dir = tmp_path / "skillm" / "profiles"
     config_path = tmp_path / "xdg" / "skillm-profile" / "skillm-profile.toml"
 
@@ -52,7 +54,7 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     config = AppConfig(
         collection_path=collection_dir,
         collection_remote="tinchogb/skills-collection",
-        skillm_profiles_dir=profiles_dir,
+        profiles_dir=profiles_dir,
     )
     init_workspace(config, config_path)
     paths = ProfilePaths.from_config(config)
@@ -92,6 +94,14 @@ def test_config_resolution_and_validation(tmp_path: Path, monkeypatch: pytest.Mo
     with pytest.raises(ConfigError, match="collection.path"):
         load_config(missing_path_toml)
 
+    bad_profiles_dir = tmp_path / "bad_profiles_dir.toml"
+    bad_profiles_dir.write_text(
+        f'[collection]\npath = "{tmp_path}"\n[paths]\nprofiles_dir = 123\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="paths.profiles_dir"):
+        load_config(bad_profiles_dir)
+
 
 def test_manifest_errors_and_roundtrip(tmp_path: Path):
     manifest_file = tmp_path / "profiles.toml"
@@ -114,87 +124,189 @@ def test_manifest_errors_and_roundtrip(tmp_path: Path):
     assert load_manifest(manifest_file) == {"a": ["s1"], "b": ["s2"]}
 
 
-def test_init_cli_interactive_and_non_interactive(
+def test_init_strict_validations_and_interactive_flow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
-    # 1. Interactive with non-XDG config path -> prints export hint
-    custom_collection = tmp_path / "my-skills"
-    custom_cfg = tmp_path / "custom-location" / "skillm-profile.toml"
-    answers = iter([str(custom_collection), "alice/skills-collection", str(custom_cfg)])
-    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    # 1. Fails immediately if 'skillm' binary is not in PATH
+    monkeypatch.setattr("skillm_profile.cli.shutil.which", lambda _: None)
+    assert main(["init"]) == 1
+    assert "not found in PATH" in capsys.readouterr().err
+    monkeypatch.setattr("skillm_profile.cli.shutil.which", lambda _: "/usr/local/bin/skillm")
 
+    # 2. --yes requires --collection-dir
+    assert main(["init", "--yes"]) == 1
+    assert "--collection-dir is required" in capsys.readouterr().err
+
+    # 3. Non-existent collection dir fails
+    missing_col = tmp_path / "does-not-exist"
+    assert main(["init", "--collection-dir", str(missing_col), "--yes"]) == 1
+    assert "does not exist" in capsys.readouterr().err
+
+    # 4. Interactive flow with non-XDG config path and custom profiles_dir
+    existing_col = tmp_path / "my-skills"
+    existing_col.mkdir()
+    custom_profiles = tmp_path / "custom-profiles"
+    custom_cfg = tmp_path / "custom-location" / "skillm-profile.toml"
+
+    prompts: list[str] = []
+
+    def fake_input(prompt_text: str) -> str:
+        prompts.append(prompt_text)
+        mapping = {
+            0: str(existing_col),
+            1: "",  # skip optional remote
+            2: str(custom_profiles),
+            3: str(custom_cfg),
+        }
+        return mapping[len(prompts) - 1]
+
+    monkeypatch.setattr("builtins.input", fake_input)
     assert main(["init"]) == 0
     out = capsys.readouterr().out
-    assert custom_cfg.exists()
+    assert "press Enter to skip" in prompts[1]
     assert "export SKILLM_PROFILE_CONFIG=" in out
 
-    # Re-running init without --force fails
-    assert main(["--config", str(custom_cfg), "init", "--yes"]) == 1
-    assert "already exists" in capsys.readouterr().err
+    loaded = load_config(custom_cfg)
+    assert loaded.collection_path == existing_col.resolve()
+    assert loaded.collection_remote == ""
+    assert loaded.profiles_dir == custom_profiles.resolve()
 
-    # Re-running with --force preserves existing collection_path and keeps profiles.toml
-    (custom_collection / "profiles.toml").write_text('[profiles]\ndev = ["a"]\n', encoding="utf-8")
-    assert main(["--config", str(custom_cfg), "init", "--yes", "--force"]) == 0
-    assert "Kept existing" in capsys.readouterr().out
+    # Verify profiles_dir is stored under [paths] in the TOML file
+    raw_toml = custom_cfg.read_text(encoding="utf-8")
+    assert "[paths]" in raw_toml
+    assert f'profiles_dir = "{custom_profiles.resolve()}"' in raw_toml
+    assert "[skillm]" not in raw_toml
 
-    # 2. Interactive with XDG default -> no export hint
-    xdg_collection = tmp_path / "xdg-skills"
-    answers_xdg = iter([str(xdg_collection), "", ""])
-    monkeypatch.setattr("builtins.input", lambda _: next(answers_xdg))
-    assert main(["init"]) == 0
-    assert "export SKILLM_PROFILE_CONFIG=" not in capsys.readouterr().out
-
-
-def test_init_git_remote_detection_and_corrupt_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    repo_dir = tmp_path / "user-skills"
-    repo_dir.mkdir()
-    (repo_dir / ".git").mkdir()
-    cfg_path = tmp_path / "cfg" / "skillm-profile.toml"
-
-    # 1. Auto-detects GitHub owner/repo from git remote origin
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda *a, **kw: subprocess.CompletedProcess(
-            a, 0, stdout="git@github.com:alice/my-skills.git\n", stderr=""
-        ),
-    )
-    assert (
-        main(["--config", str(cfg_path), "init", "--collection-dir", str(repo_dir), "--yes"]) == 0
-    )
-    loaded = load_config(cfg_path)
-    assert loaded.collection_path == repo_dir.resolve()
-    assert loaded.collection_remote == "alice/my-skills"
-
-    # 2. Gracefully returns empty remote when git remote fails
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda *a, **kw: subprocess.CompletedProcess(a, 1, stdout="", stderr="no remote"),
-    )
+    # 5. Re-running without --force fails when config or profiles.toml exists
     assert (
         main(
             [
                 "--config",
-                str(cfg_path),
+                str(custom_cfg),
                 "init",
                 "--collection-dir",
-                str(repo_dir),
+                str(existing_col),
+                "--yes",
+            ]
+        )
+        == 1
+    )
+    assert "already exists" in capsys.readouterr().err
+
+    # 6. Re-running with --force succeeds and keeps existing profiles.toml
+    (existing_col / "profiles.toml").write_text('[profiles]\ndev = ["a"]\n', encoding="utf-8")
+    assert (
+        main(
+            [
+                "--config",
+                str(custom_cfg),
+                "init",
+                "--collection-dir",
+                str(existing_col),
+                "--profiles-dir",
+                str(custom_profiles),
                 "--yes",
                 "--force",
             ]
         )
         == 0
     )
-    assert load_config(cfg_path).collection_remote == ""
+    assert "Kept existing" in capsys.readouterr().out
 
-    # 3. Corrupt existing config falls back to ~/skills-collection inside isolated HOME
-    corrupt_cfg = tmp_path / "corrupt.toml"
-    corrupt_cfg.write_text("not = [valid", encoding="utf-8")
-    assert main(["--config", str(corrupt_cfg), "init", "--yes", "--force"]) == 0
-    assert load_config(corrupt_cfg).collection_path == (Path.home() / "skills-collection").resolve()
+    # 7. Interactive with XDG default -> no export hint
+    xdg_col = tmp_path / "xdg-skills"
+    xdg_col.mkdir()
+    answers_xdg = iter([str(xdg_col), "alice/skills", "", ""])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers_xdg))
+    assert main(["init"]) == 0
+    assert "export SKILLM_PROFILE_CONFIG=" not in capsys.readouterr().out
+
+
+def test_init_filesystem_edge_cases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    col = tmp_path / "col"
+    col.mkdir()
+
+    # Empty input validation
+    monkeypatch.setattr("builtins.input", lambda _: "   ")
+    assert main(["init"]) == 1
+
+    # Target config path is an existing directory
+    dir_as_cfg = tmp_path / "cfg_dir"
+    dir_as_cfg.mkdir()
+    assert (
+        main(
+            ["--config", str(dir_as_cfg), "init", "--collection-dir", str(col), "--yes", "--force"]
+        )
+        == 1
+    )
+
+    # Target profiles_dir is an existing file
+    file_as_profiles = tmp_path / "profiles_file"
+    file_as_profiles.write_text("x", encoding="utf-8")
+    assert (
+        main(
+            [
+                "--config",
+                str(tmp_path / "c1.toml"),
+                "init",
+                "--collection-dir",
+                str(col),
+                "--profiles-dir",
+                str(file_as_profiles),
+                "--yes",
+            ]
+        )
+        == 1
+    )
+
+    # Unwritable parent directories (simulated via os.access)
+    monkeypatch.setattr("skillm_profile.cli.os.access", lambda *_: False)
+    assert (
+        main(
+            [
+                "--config",
+                str(tmp_path / "no_write" / "c.toml"),
+                "init",
+                "--collection-dir",
+                str(col),
+                "--yes",
+            ]
+        )
+        == 1
+    )
+    monkeypatch.setattr("skillm_profile.cli.os.access", lambda *_: True)
+
+    # Direct init_workspace guards
+    bad_cfg = AppConfig(collection_path=tmp_path / "missing_col")
+    with pytest.raises(SkillmProfileError, match="Collection directory does not exist"):
+        init_workspace(bad_cfg, tmp_path / "out.toml")
+
+    valid_cfg = AppConfig(collection_path=col, profiles_dir=tmp_path / "p_dir")
+    with pytest.raises(SkillmProfileError, match="is a directory"):
+        init_workspace(valid_cfg, dir_as_cfg, force=True)
+
+    (col / "profiles.toml").write_text("[profiles]\n", encoding="utf-8")
+    with pytest.raises(SkillmProfileError, match="Profiles manifest already exists"):
+        init_workspace(valid_cfg, tmp_path / "fresh.toml", force=False)
+
+    bad_pdir_cfg = AppConfig(collection_path=col, profiles_dir=file_as_profiles)
+    with pytest.raises(SkillmProfileError, match="not a directory"):
+        init_workspace(bad_pdir_cfg, tmp_path / "fresh2.toml", force=True)
+
+    monkeypatch.setattr("skillm_profile.core.os.access", lambda *_: False)
+    with pytest.raises(SkillmProfileError, match="Cannot write"):
+        init_workspace(valid_cfg, tmp_path / "nw" / "fresh3.toml", force=True)
+
+    unwritable_root = tmp_path / "locked_root"
+    unwritable_root.mkdir()
+    monkeypatch.setattr(
+        "skillm_profile.core.os.access", lambda path, mode: Path(path) != unwritable_root
+    )
+    locked_pdir_cfg = AppConfig(
+        collection_path=col, profiles_dir=unwritable_root / "nested" / "profiles"
+    )
+    with pytest.raises(SkillmProfileError, match="Cannot create profiles directory"):
+        init_workspace(locked_pdir_cfg, tmp_path / "ok.toml", force=True)
 
 
 def test_profile_lifecycle_and_cli_commands(
@@ -420,6 +532,7 @@ def test_cli_fallback_return_zero(workspace, monkeypatch: pytest.MonkeyPatch):
 
 def test_bootstrap_command_and_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
     collection_dir = tmp_path / "skills-collection"
+    collection_dir.mkdir()
     profiles_dir = tmp_path / "skillm" / "profiles"
     config_path = tmp_path / "xdg" / "skillm-profile" / "skillm-profile.toml"
     monkeypatch.setenv("SKILLM_PROFILE_CONFIG", str(config_path))
@@ -427,7 +540,7 @@ def test_bootstrap_command_and_errors(tmp_path: Path, monkeypatch: pytest.Monkey
     config = AppConfig(
         collection_path=collection_dir,
         collection_remote="tinchogb/skills-collection",
-        skillm_profiles_dir=profiles_dir,
+        profiles_dir=profiles_dir,
     )
     init_workspace(config, config_path)
     paths = ProfilePaths.from_config(config)
@@ -446,7 +559,7 @@ def test_bootstrap_command_and_errors(tmp_path: Path, monkeypatch: pytest.Monkey
     local_only_cfg = AppConfig(
         collection_path=collection_dir,
         collection_remote="",
-        skillm_profiles_dir=profiles_dir,
+        profiles_dir=profiles_dir,
     )
     init_workspace(local_only_cfg, config_path, force=True)
     recorded.clear()
@@ -460,3 +573,101 @@ def test_bootstrap_command_and_errors(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setattr("skillm_profile.core.run_skillm", fail_bootstrap)
     assert main(["bootstrap"]) == 1
     assert "Bootstrap failed" in capsys.readouterr().err
+
+
+def test_init_rejects_blank_path_arguments(tmp_path: Path):
+    col = tmp_path / "col"
+    col.mkdir()
+
+    assert (
+        main(
+            [
+                "--config",
+                str(tmp_path / "c1.toml"),
+                "init",
+                "--collection-dir",
+                str(col),
+                "--profiles-dir",
+                "   ",
+                "--yes",
+            ]
+        )
+        == 1
+    )
+    assert main(["--config", "   ", "init", "--collection-dir", str(col), "--yes"]) == 1
+
+
+def test_init_rejects_readonly_or_invalid_targets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    col = tmp_path / "col"
+    col.mkdir()
+
+    readonly_profiles = tmp_path / "ro_profiles"
+    readonly_profiles.mkdir()
+    monkeypatch.setattr(
+        "skillm_profile.cli.os.access", lambda path, mode: Path(path) != readonly_profiles
+    )
+    assert (
+        main(
+            [
+                "--config",
+                str(tmp_path / "c_ro.toml"),
+                "init",
+                "--collection-dir",
+                str(col),
+                "--profiles-dir",
+                str(readonly_profiles),
+                "--yes",
+            ]
+        )
+        == 1
+    )
+    monkeypatch.setattr("skillm_profile.cli.os.access", lambda *_: True)
+
+    dir_cfg = tmp_path / "dir_as_cfg"
+    dir_cfg.mkdir()
+    assert (
+        main(["--config", str(dir_cfg), "init", "--collection-dir", str(col), "--yes", "--force"])
+        == 1
+    )
+
+
+def test_init_workspace_refuses_to_overwrite_existing_config(tmp_path: Path):
+    col = tmp_path / "col"
+    col.mkdir()
+    existing_cfg = tmp_path / "already.toml"
+    existing_cfg.write_text("[collection]\n", encoding="utf-8")
+
+    cfg = AppConfig(collection_path=col, profiles_dir=tmp_path / "p_out")
+    with pytest.raises(SkillmProfileError, match="Config file already exists"):
+        init_workspace(cfg, existing_cfg, force=False)
+
+
+def test_init_rejects_unwritable_config_parent_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    col = tmp_path / "col"
+    col.mkdir()
+    writable_profiles = tmp_path / "profiles"
+    locked_cfg_parent = tmp_path / "locked_cfg_dir"
+    locked_cfg_parent.mkdir()
+
+    monkeypatch.setattr(
+        "skillm_profile.cli.os.access",
+        lambda path, mode: Path(path) != locked_cfg_parent,
+    )
+
+    assert (
+        main(
+            [
+                "--config",
+                str(locked_cfg_parent / "skillm-profile.toml"),
+                "init",
+                "--collection-dir",
+                str(col),
+                "--profiles-dir",
+                str(writable_profiles),
+                "--yes",
+            ]
+        )
+        == 1
+    )
