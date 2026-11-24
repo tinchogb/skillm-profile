@@ -21,7 +21,7 @@ Manage isolated [skillm](https://github.com/ultrakorne/skillm) profile environme
 
 ## Installation
 
-Install globally using [`uv`][https://astral.sh](https://docs.astral.sh/uv/):
+Install globally using [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
 uv tool install .
