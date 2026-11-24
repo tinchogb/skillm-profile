@@ -1,6 +1,6 @@
 # skillm-profile
 
-Manage isolated [skillm](https://github.com) profile environments backed by a centralized, version-controlled skills repository.
+Manage isolated [skillm](https://github.com/ultrakorne/skillm) profile environments backed by a centralized, version-controlled skills repository.
 
 ## Overview
 
@@ -16,12 +16,12 @@ Manage isolated [skillm](https://github.com) profile environments backed by a ce
 ## Prerequisites
 
 - Python `>= 3.11`
-- [`skillm`](https://github.com) installed and available in your `PATH` (tested with `skillm v0.7.1`, `list --json` schema `v1`)
+- [`skillm`](https://github.com/ultrakorne/skillm) installed and available in your `PATH` (tested with `skillm v0.7.1`, `list --json` schema `v1`)
 - A local directory (typically a Git repository) holding your skills and `profiles.toml`
 
 ## Installation
 
-Install globally using [`uv`](https://astral.sh):
+Install globally using [`uv`][https://astral.sh](https://docs.astral.sh/uv/):
 
 ```bash
 uv tool install .
@@ -30,7 +30,7 @@ uv tool install .
 Or install directly from GitHub:
 
 ```bash
-uv tool install git+https://github.com
+uv tool install git+https://github.com/tinchogb/skillm-profile.git
 ```
 
 ## Quickstart
@@ -42,8 +42,8 @@ uv tool install git+https://github.com
    ```
 
    Follow the interactive prompts to specify:
-   - Path to your existing local `skills-collection` directory
-   - Optional GitHub repository (`owner/repo`) for remote bootstrapping
+   - Path to your existing local `collection of skills` directory
+   - Optional remote repository (`owner/repo`) of `collection of skills` for remote bootstrapping
    - Directory where profile environments will be materialized (e.g. `~/.local/share/skillm-profile/profiles`)
    - Location of `skillm-profile.toml` (defaults to `~/.config/skillm-profile/skillm-profile.toml`)
 
@@ -56,8 +56,8 @@ uv tool install git+https://github.com
 3. **Create and manage profiles:**
 
    ```bash
-   skillm-profile create research
-   skillm-profile add research zotero-cli zotero-library-curator
+   skillm-profile create new-profile
+   skillm-profile add new-profile skill1 skill2
    skillm-profile sync --all
    ```
 
@@ -88,11 +88,11 @@ third_party_dir = "third-party"
 Stored inside `[collection].path` and tracked in Git:
 
 ```toml
-[profiles.research]
+[profiles.new-profile]
 skills = [
-    "zotero-cli",
-    "zotero-library-curator",
-    "zotero-semantic-tagger",
+    "skill1",
+    "skill2",
+    "skill3",
 ]
 ```
 
