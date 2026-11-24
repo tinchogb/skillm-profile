@@ -33,48 +33,59 @@ def _list_skills_data() -> list[dict]:
     if not raw.strip():
         return []
     try:
-        data = json.loads(raw)
+        payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise SkillmCommandError(f"Failed to parse 'skillm list --json' output: {exc}") from exc
 
-    if isinstance(data, dict) and "skills" in data:
-        return list(data["skills"])
-    if isinstance(data, list):
-        return data
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data")
+    if isinstance(data, dict) and isinstance(data.get("skills"), list):
+        return data["skills"]
+    if isinstance(payload.get("skills"), list):
+        return payload["skills"]
     return []
 
 
 def get_global_skills() -> list[str]:
     result: list[str] = []
     for item in _list_skills_data():
-        skill_id = item.get("id") or item.get("name")
-        if not skill_id:
+        if not isinstance(item, dict):
             continue
-        if item.get("global") is True or item.get("scope") == "global":
-            result.append(skill_id)
+        skill_id = item.get("id")
+        if not isinstance(skill_id, str) or not skill_id:
             continue
         installs = item.get("installs", [])
-        if any(inst.get("scope") == "global" or inst.get("global") is True for inst in installs):
+        if isinstance(installs, list) and any(
+            isinstance(inst, dict) and inst.get("scope") == "global" for inst in installs
+        ):
             result.append(skill_id)
     return sorted(set(result))
 
 
 def get_project_skills(project_dir: Path) -> list[str]:
-    target = str(project_dir.expanduser().resolve())
+    target_root = project_dir.expanduser().resolve()
+    expected_agents_dir = target_root / ".agents" / "skills"
     result: list[str] = []
     for item in _list_skills_data():
-        skill_id = item.get("id") or item.get("name")
-        if not skill_id:
+        if not isinstance(item, dict):
             continue
-        for key in ("project", "path", "dir"):
-            val = item.get(key)
-            if val and str(Path(val).expanduser().resolve()) == target:
-                result.append(skill_id)
-                break
+        skill_id = item.get("id")
+        if not isinstance(skill_id, str) or not skill_id:
+            continue
         installs = item.get("installs", [])
+        if not isinstance(installs, list):
+            continue
         for inst in installs:
-            inst_path = inst.get("project") or inst.get("path") or inst.get("dir")
-            if inst_path and str(Path(inst_path).expanduser().resolve()) == target:
-                result.append(skill_id)
-                break
+            if not isinstance(inst, dict) or inst.get("scope") == "global":
+                continue
+            raw_path = inst.get("path")
+            if isinstance(raw_path, str) and raw_path:
+                inst_path = Path(raw_path).expanduser().resolve()
+                if (
+                    inst_path == expected_agents_dir / skill_id
+                    or inst_path.parent == expected_agents_dir
+                ):
+                    result.append(skill_id)
+                    break
     return sorted(set(result))

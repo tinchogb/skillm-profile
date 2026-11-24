@@ -116,8 +116,12 @@ def test_manifest_errors_and_roundtrip(tmp_path: Path):
     with pytest.raises(ManifestError, match="Invalid '\\[profiles\\]'"):
         load_manifest(manifest_file)
 
-    manifest_file.write_text('[profiles]\nresearch = "not-a-list"\n', encoding="utf-8")
-    with pytest.raises(ManifestError, match="Invalid skill list"):
+    manifest_file.write_text('[profiles]\nresearch = "not-a-section"\n', encoding="utf-8")
+    with pytest.raises(ManifestError, match="Invalid profile section"):
+        load_manifest(manifest_file)
+
+    manifest_file.write_text('[profiles.research]\nskills = "not-a-list"\n', encoding="utf-8")
+    with pytest.raises(ManifestError, match="Invalid 'skills' list"):
         load_manifest(manifest_file)
 
     save_manifest(manifest_file, {"b": ["s2"], "a": ["s1"]})
@@ -194,7 +198,9 @@ def test_init_strict_validations_and_interactive_flow(
     assert "already exists" in capsys.readouterr().err
 
     # 6. Re-running with --force succeeds and keeps existing profiles.toml
-    (existing_col / "profiles.toml").write_text('[profiles]\ndev = ["a"]\n', encoding="utf-8")
+    (existing_col / "profiles.toml").write_text(
+        '[profiles.dev]\nskills = ["a"]\n', encoding="utf-8"
+    )
     assert (
         main(
             [
@@ -460,14 +466,40 @@ def test_runner_parsing_and_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     )
     assert get_global_skills() == []
 
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **kw: subprocess.CompletedProcess(a, 0, stdout="{}", stderr=""),
+    )
+    assert get_global_skills() == []
+
     proj_dir = tmp_path / "profiles" / "research"
     payload = {
-        "skills": [
-            {"id": "skill-a", "scope": "global"},
-            {"name": "skill-b", "installs": [{"global": True}, {"project": str(proj_dir)}]},
-            {"id": "skill-c", "project": str(proj_dir)},
-            {"no_id": True},
-        ]
+        "schema_version": 1,
+        "data": {
+            "skills": [
+                "not-a-dict",
+                {"no_id": True},
+                {
+                    "id": "skill-a",
+                    "installs": [{"scope": "global", "path": "/home/user/.agents/skills/skill-a"}],
+                },
+                {
+                    "id": "skill-b",
+                    "installs": [
+                        {"scope": "global", "path": "/home/user/.agents/skills/skill-b"},
+                        {
+                            "scope": "local",
+                            "path": str(proj_dir / ".agents" / "skills" / "skill-b"),
+                        },
+                    ],
+                },
+                {
+                    "id": "skill-c",
+                    "installs": "invalid-installs",
+                },
+            ]
+        },
     }
     monkeypatch.setattr(
         subprocess,
@@ -475,7 +507,7 @@ def test_runner_parsing_and_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         lambda *a, **kw: subprocess.CompletedProcess(a, 0, stdout=json.dumps(payload), stderr=""),
     )
     assert get_global_skills() == ["skill-a", "skill-b"]
-    assert get_project_skills(proj_dir) == ["skill-b", "skill-c"]
+    assert get_project_skills(proj_dir) == ["skill-b"]
 
 
 def test_main_module_entrypoint(monkeypatch: pytest.MonkeyPatch):
@@ -513,7 +545,12 @@ def test_remaining_branches_for_full_coverage(workspace, monkeypatch: pytest.Mon
         subprocess,
         "run",
         lambda *a, **kw: subprocess.CompletedProcess(
-            a, 0, stdout=json.dumps([{"id": "list-skill", "global": True}]), stderr=""
+            a,
+            0,
+            stdout=json.dumps(
+                {"skills": [{"id": "list-skill", "installs": [{"scope": "global"}]}]}
+            ),
+            stderr="",
         ),
     )
     assert get_global_skills() == ["list-skill"]
