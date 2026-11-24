@@ -105,7 +105,7 @@ def _run_init(args: argparse.Namespace) -> int:
         )
     else:
         collection_raw = args.collection_dir or _prompt(
-            "Path to existing skills-collection repository",
+            "Path to existing collection of skills repository",
             hint="required, existing directory",
         )
         collection_path = _validate_existing_dir(collection_raw, "Collection directory")
@@ -114,13 +114,13 @@ def _run_init(args: argparse.Namespace) -> int:
             args.remote.strip()
             if args.remote is not None
             else _prompt(
-                "GitHub repository owner/repo",
+                "Remote repository (owner/repo) of collection of skills",
                 hint="optional, press Enter to skip",
             )
         )
 
         profiles_raw = args.profiles_dir or _prompt(
-            "Directory where skillm profiles will be materialized",
+            "Directory where skillm-profile's profiles will be materialized",
             default=default_profiles_dir,
         )
         profiles_dir = _validate_creatable_dir(profiles_raw, "Profiles directory")
@@ -210,7 +210,6 @@ examples:
         action="store_true",
         help="Non-interactive mode (requires --collection-dir).",
     )
-
     p_boot = sub.add_parser(
         "bootstrap",
         help="Install global skills from the configured collection and sync all profiles.",
