@@ -1,4 +1,6 @@
 import argparse
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -26,28 +28,59 @@ from skillm_profile.paths import ProfilePaths
 from skillm_profile.runner import SkillmCommandError
 
 
-def _prompt(question: str, default: str) -> str:
-    raw = input(f"{question} [{default}]: ").strip()
+def _prompt(question: str, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    raw = input(f"{question}{suffix}: ").strip()
     return raw if raw else default
 
 
+def _detect_github_remote(repo_dir: Path) -> str:
+    if not (repo_dir / ".git").exists():
+        return ""
+    proc = subprocess.run(
+        ["git", "-C", str(repo_dir), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return ""
+    url = proc.stdout.strip()
+    match = re.search(r"github\.com[:/]([^/]+/[^/.]+?)(?:\.git)?$", url)
+    return match.group(1) if match else ""
+
+
 def _run_init(args: argparse.Namespace) -> int:
-    default_collection = str(Path.home() / "Projects" / "2026" / "skills-collection")
-    default_remote = "tinchogb/skills-collection"
-    default_cfg = str(resolve_config_path(args.config))
+    config_path_preview = resolve_config_path(args.config)
+    existing_cfg = None
+    if config_path_preview.exists():
+        try:
+            existing_cfg = load_config(config_path_preview)
+        except ConfigError:
+            existing_cfg = None
+
+    default_collection = str(
+        existing_cfg.collection_path if existing_cfg else Path.home() / "skills-collection"
+    )
+    default_cfg = str(config_path_preview)
 
     if args.yes:
         collection_raw = args.collection_dir or default_collection
-        remote_raw = args.remote if args.remote is not None else default_remote
+        collection_path = Path(collection_raw).expanduser().resolve()
+        remote_raw = (
+            args.remote if args.remote is not None else _detect_github_remote(collection_path)
+        )
         config_raw = args.config or default_cfg
     else:
         collection_raw = args.collection_dir or _prompt(
             "Path to local skills-collection repository", default_collection
         )
+        collection_path = Path(collection_raw).expanduser().resolve()
+        detected_remote = _detect_github_remote(collection_path)
         remote_raw = (
             args.remote
             if args.remote is not None
-            else _prompt("GitHub repository (owner/repo, optional)", default_remote)
+            else _prompt("GitHub repository (owner/repo, optional)", detected_remote)
         )
         config_raw = args.config or _prompt("Configuration file path", default_cfg)
 
@@ -55,7 +88,7 @@ def _run_init(args: argparse.Namespace) -> int:
     xdg_default = default_xdg_config_path().resolve()
 
     config = AppConfig(
-        collection_path=Path(collection_raw).expanduser().resolve(),
+        collection_path=collection_path,
         collection_remote=remote_raw.strip(),
     )
 
@@ -90,7 +123,7 @@ examples:
   skillm-profile init
   skillm-profile bootstrap
   skillm-profile create research
-  skillm-profile add research zotero-cli zotero-library-curator
+  skillm-profile add research my-skill-a my-skill-b
   skillm-profile sync --all
 """
 
@@ -111,12 +144,12 @@ examples:
     p_init.add_argument(
         "--collection-dir",
         metavar="DIR",
-        help="Local path to skills-collection repository.",
+        help="Local path to skills-collection repository (default: ~/skills-collection).",
     )
     p_init.add_argument(
         "--remote",
         metavar="OWNER/REPO",
-        help="GitHub repository shorthand (e.g. tinchogb/skills-collection).",
+        help="GitHub repository shorthand (auto-detected from git origin if available).",
     )
     p_init.add_argument(
         "--force",
