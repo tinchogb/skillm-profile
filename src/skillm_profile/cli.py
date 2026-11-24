@@ -1,6 +1,6 @@
 import argparse
-import re
-import subprocess
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -28,68 +28,111 @@ from skillm_profile.paths import ProfilePaths
 from skillm_profile.runner import SkillmCommandError
 
 
-def _prompt(question: str, default: str = "") -> str:
-    suffix = f" [{default}]" if default else ""
+def _prompt(question: str, default: str | None = None, hint: str | None = None) -> str:
+    suffix = f" [{default}]" if default is not None else f" ({hint})"
     raw = input(f"{question}{suffix}: ").strip()
-    return raw if raw else default
+    return raw if raw else (default or "")
 
 
-def _detect_github_remote(repo_dir: Path) -> str:
-    if not (repo_dir / ".git").exists():
-        return ""
-    proc = subprocess.run(
-        ["git", "-C", str(repo_dir), "remote", "get-url", "origin"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        return ""
-    url = proc.stdout.strip()
-    match = re.search(r"github\.com[:/]([^/]+/[^/.]+?)(?:\.git)?$", url)
-    return match.group(1) if match else ""
+def _validate_existing_dir(raw: str, label: str) -> Path:
+    if not raw.strip():
+        raise SkillmProfileError(f"{label} is required and cannot be empty.")
+    path = Path(raw).expanduser().resolve()
+    if not path.exists() or not path.is_dir():
+        raise SkillmProfileError(f"{label} does not exist or is not a directory: '{path}'.")
+    return path
+
+
+def _validate_creatable_dir(raw: str, label: str) -> Path:
+    if not raw.strip():
+        raise SkillmProfileError(f"{label} is required and cannot be empty.")
+    path = Path(raw).expanduser().resolve()
+    if path.exists():
+        if not path.is_dir():
+            raise SkillmProfileError(f"{label} exists and is not a directory: '{path}'.")
+        if not os.access(path, os.W_OK):
+            raise SkillmProfileError(f"{label} is not writable: '{path}'.")
+        return path
+    probe = path.parent
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    if not probe.exists() or not os.access(probe, os.W_OK):
+        raise SkillmProfileError(
+            f"Cannot create {label} at '{path}': parent '{probe}' is not writable."
+        )
+    return path
+
+
+def _validate_target_file(raw: str, label: str, force: bool) -> Path:
+    if not raw.strip():
+        raise SkillmProfileError(f"{label} is required and cannot be empty.")
+    path = Path(raw).expanduser().resolve()
+    if path.exists() and not force:
+        raise SkillmProfileError(f"{label} already exists at '{path}'. Use --force to overwrite.")
+    if path.exists() and path.is_dir():
+        raise SkillmProfileError(f"{label} path '{path}' is a directory, not a file.")
+    probe = path.parent
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    if not probe.exists() or not os.access(probe, os.W_OK):
+        raise SkillmProfileError(
+            f"Cannot write {label} at '{path}': parent '{probe}' is not writable."
+        )
+    return path
 
 
 def _run_init(args: argparse.Namespace) -> int:
-    config_path_preview = resolve_config_path(args.config)
-    existing_cfg = None
-    if config_path_preview.exists():
-        try:
-            existing_cfg = load_config(config_path_preview)
-        except ConfigError:
-            existing_cfg = None
+    if shutil.which("skillm") is None:
+        raise SkillmProfileError(
+            "The 'skillm' binary was not found in PATH. Install skillm before running init."
+        )
 
-    default_collection = str(
-        existing_cfg.collection_path if existing_cfg else Path.home() / "skills-collection"
-    )
-    default_cfg = str(config_path_preview)
+    default_profiles_dir = str(Path.home() / ".skillm" / "profiles")
+    default_cfg = str(resolve_config_path(args.config))
 
     if args.yes:
-        collection_raw = args.collection_dir or default_collection
-        collection_path = Path(collection_raw).expanduser().resolve()
-        remote_raw = (
-            args.remote if args.remote is not None else _detect_github_remote(collection_path)
+        if not args.collection_dir:
+            raise SkillmProfileError(
+                "--collection-dir is required when using --yes in non-interactive mode."
+            )
+        collection_path = _validate_existing_dir(args.collection_dir, "Collection directory")
+        remote_raw = args.remote.strip() if args.remote else ""
+        profiles_dir = _validate_creatable_dir(
+            args.profiles_dir or default_profiles_dir, "Profiles directory"
         )
-        config_raw = args.config or default_cfg
+        config_path = _validate_target_file(
+            args.config or default_cfg, "Configuration file", force=args.force
+        )
     else:
         collection_raw = args.collection_dir or _prompt(
-            "Path to local skills-collection repository", default_collection
+            "Path to existing skills-collection repository",
+            hint="required, existing directory",
         )
-        collection_path = Path(collection_raw).expanduser().resolve()
-        detected_remote = _detect_github_remote(collection_path)
+        collection_path = _validate_existing_dir(collection_raw, "Collection directory")
+
         remote_raw = (
-            args.remote
+            args.remote.strip()
             if args.remote is not None
-            else _prompt("GitHub repository (owner/repo, optional)", detected_remote)
+            else _prompt(
+                "GitHub repository owner/repo",
+                hint="optional, press Enter to skip",
+            )
         )
-        config_raw = args.config or _prompt("Configuration file path", default_cfg)
 
-    config_path = Path(config_raw).expanduser().resolve()
+        profiles_raw = args.profiles_dir or _prompt(
+            "Directory where skillm profiles will be materialized",
+            default=default_profiles_dir,
+        )
+        profiles_dir = _validate_creatable_dir(profiles_raw, "Profiles directory")
+
+        config_raw = args.config or _prompt("Configuration file path", default=default_cfg)
+        config_path = _validate_target_file(config_raw, "Configuration file", force=args.force)
+
     xdg_default = default_xdg_config_path().resolve()
-
     config = AppConfig(
         collection_path=collection_path,
-        collection_remote=remote_raw.strip(),
+        collection_remote=remote_raw,
+        profiles_dir=profiles_dir,
     )
 
     actions = init_workspace(config, config_path, force=args.force)
@@ -144,23 +187,28 @@ examples:
     p_init.add_argument(
         "--collection-dir",
         metavar="DIR",
-        help="Local path to skills-collection repository (default: ~/skills-collection).",
+        help="Path to an existing skills-collection repository (required with --yes).",
     )
     p_init.add_argument(
         "--remote",
         metavar="OWNER/REPO",
-        help="GitHub repository shorthand (auto-detected from git origin if available).",
+        help="Optional GitHub repository shorthand (e.g. owner/repo).",
+    )
+    p_init.add_argument(
+        "--profiles-dir",
+        metavar="DIR",
+        help="Directory where profile environments are materialized (default: ~/.skillm/profiles).",
     )
     p_init.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite existing configuration file.",
+        help="Overwrite existing configuration file or keep existing profiles.toml.",
     )
     p_init.add_argument(
         "--yes",
         "-y",
         action="store_true",
-        help="Accept defaults without interactive prompts.",
+        help="Non-interactive mode (requires --collection-dir).",
     )
 
     p_boot = sub.add_parser(

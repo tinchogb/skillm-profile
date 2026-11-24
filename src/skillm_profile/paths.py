@@ -19,7 +19,7 @@ class ProfilePaths:
             profiles_toml=config.collection_path / config.profiles_manifest,
             custom_dir=config.collection_path / config.custom_dir,
             third_party_dir=config.collection_path / config.third_party_dir,
-            profiles_dir=config.skillm_profiles_dir,
+            profiles_dir=config.profiles_dir,
         )
 
     def profile_dir(self, profile: str) -> Path:

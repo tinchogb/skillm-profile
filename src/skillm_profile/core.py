@@ -1,3 +1,4 @@
+import os
 import shutil
 from pathlib import Path
 
@@ -16,6 +17,18 @@ class SkillmProfileError(RuntimeError):
     """Domain error for skillm-profile operations."""
 
 
+def _ensure_writable_target(target_path: Path, label: str) -> None:
+    if target_path.exists() and target_path.is_dir():
+        raise SkillmProfileError(f"{label} path '{target_path}' is a directory, not a file.")
+    probe = target_path.parent
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    if not probe.exists() or not probe.is_dir() or not os.access(probe, os.W_OK):
+        raise SkillmProfileError(
+            f"Cannot write {label} at '{target_path}': parent directory '{probe}' is not writable."
+        )
+
+
 def init_workspace(
     config: AppConfig,
     config_path: Path,
@@ -24,15 +37,45 @@ def init_workspace(
     paths = ProfilePaths.from_config(config)
     actions: list[str] = []
 
-    if config_path.exists() and not force:
+    if not paths.collection_dir.exists() or not paths.collection_dir.is_dir():
         raise SkillmProfileError(
-            f"Config file already exists at {config_path}. Use --force to overwrite."
+            f"Collection directory does not exist: '{paths.collection_dir}'. "
+            "Create or clone it first."
         )
 
-    paths.collection_dir.mkdir(parents=True, exist_ok=True)
+    if config_path.exists() and not force:
+        raise SkillmProfileError(
+            f"Config file already exists at '{config_path}'. Use --force to overwrite."
+        )
+    _ensure_writable_target(config_path, "configuration file")
+
+    if paths.profiles_toml.exists() and not force:
+        raise SkillmProfileError(
+            f"Profiles manifest already exists at '{paths.profiles_toml}'. "
+            "Use --force to keep/overwrite."
+        )
+    _ensure_writable_target(paths.profiles_toml, "profiles manifest")
+
+    if paths.profiles_dir.exists() and not paths.profiles_dir.is_dir():
+        raise SkillmProfileError(
+            f"Profiles directory path '{paths.profiles_dir}' exists and is not a directory."
+        )
+    if not paths.profiles_dir.exists():
+        probe = paths.profiles_dir.parent
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        if not probe.exists() or not os.access(probe, os.W_OK):
+            raise SkillmProfileError(
+                f"Cannot create profiles directory '{paths.profiles_dir}': "
+                f"'{probe}' is not writable."
+            )
+        paths.profiles_dir.mkdir(parents=True, exist_ok=True)
+        actions.append(f"Created profiles directory {paths.profiles_dir}")
+    else:
+        actions.append(f"Using existing profiles directory {paths.profiles_dir}")
+
     paths.custom_dir.mkdir(parents=True, exist_ok=True)
     paths.third_party_dir.mkdir(parents=True, exist_ok=True)
-    paths.profiles_dir.mkdir(parents=True, exist_ok=True)
 
     if not paths.profiles_toml.exists():
         paths.profiles_toml.write_text("[profiles]\n", encoding="utf-8")

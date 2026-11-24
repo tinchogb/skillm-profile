@@ -30,29 +30,34 @@ class AppConfig:
     collection_path: Path
     collection_remote: str = ""
     profiles_manifest: str = "profiles.toml"
+    profiles_dir: Path = Path.home() / ".skillm" / "profiles"
     custom_dir: str = "custom"
     third_party_dir: str = "third-party"
-    skillm_profiles_dir: Path = Path.home() / ".skillm" / "profiles"
 
     @classmethod
     def from_dict(cls, data: dict) -> "AppConfig":
         collection = data.get("collection", {})
         paths = data.get("paths", {})
-        skillm = data.get("skillm", {})
+        legacy_skillm = data.get("skillm", {})
 
         raw_collection_path = collection.get("path")
         if not raw_collection_path or not isinstance(raw_collection_path, str):
             raise ConfigError("Missing or invalid 'collection.path' in configuration.")
 
-        raw_profiles_dir = skillm.get("profiles_dir", str(Path.home() / ".skillm" / "profiles"))
+        raw_profiles_dir = paths.get(
+            "profiles_dir",
+            legacy_skillm.get("profiles_dir", str(Path.home() / ".skillm" / "profiles")),
+        )
+        if not raw_profiles_dir or not isinstance(raw_profiles_dir, str):
+            raise ConfigError("Invalid 'paths.profiles_dir' in configuration.")
 
         return cls(
             collection_path=Path(raw_collection_path).expanduser().resolve(),
             collection_remote=str(collection.get("remote", "")).strip(),
             profiles_manifest=str(paths.get("profiles_manifest", "profiles.toml")).strip(),
+            profiles_dir=Path(raw_profiles_dir).expanduser().resolve(),
             custom_dir=str(paths.get("custom_dir", "custom")).strip(),
             third_party_dir=str(paths.get("third_party_dir", "third-party")).strip(),
-            skillm_profiles_dir=Path(raw_profiles_dir).expanduser().resolve(),
         )
 
     def to_dict(self) -> dict:
@@ -63,11 +68,9 @@ class AppConfig:
             },
             "paths": {
                 "profiles_manifest": self.profiles_manifest,
+                "profiles_dir": str(self.profiles_dir),
                 "custom_dir": self.custom_dir,
                 "third_party_dir": self.third_party_dir,
-            },
-            "skillm": {
-                "profiles_dir": str(self.skillm_profiles_dir),
             },
         }
 
